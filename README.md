@@ -1,30 +1,30 @@
 # dsh-memory
 
-Durable cross-session memory for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供跨会话持久记忆的插件。
 
-This is a fork of `dsh-memory` that widens the peer range for DSH 0.2.0-rc.2 and fixes CJK search. The harness ships no memory plugin. Its `extension-cookbook` names the mechanism — a prompt section plus tools — but nothing implements it, so every session starts blank. This package fills that gap with one local SQLite file: **no embedding service, no API key, no sidecar process.**
+本仓库是 `dsh-memory` 的 fork：放宽了 peer 版本范围以兼容 DSH 0.2.0-rc.2，并修复了中文搜索。Harness 官方没有自带记忆插件——它的 `extension-cookbook` 只给出了机制（提示词区段 + 工具），却没有实现，导致每个会话都从零开始。本包用一个本地 SQLite 文件填补了这个空缺：**无需嵌入模型服务，无需 API key，无需额外进程。**
 
-## Install
+## 安装
 
 ```bash
-dsh plugin --profile web add dsh-memory
+dsh plugin --profile web install github:lolicin/dsh-memory
 ```
 
-The shipped bundle row stores memories at `$DSH_HOME/memory/memory.db`, shared by every profile on the machine.
+自带的 bundle 配置把记忆存放在 `$DSH_HOME/memory/memory.db`，机器上所有 profile 共享同一份记忆。
 
-## What it gives the model
+## 模型能用到什么
 
-| Tool | Purpose |
+| 工具 | 用途 |
 |---|---|
-| `memory_write` | Store one self-contained durable fact, optionally tagged and pinned |
-| `memory_search` | Keyword search over memory text and tags |
-| `memory_forget` | Delete a memory that is now wrong or obsolete |
+| `memory_write` | 记住一条自包含的持久事实，可带标签和置顶 |
+| `memory_search` | 按关键词搜索记忆正文和标签 |
+| `memory_forget` | 删除已经过时或错误的记忆 |
 
-Plus a `memory:recall` prompt section that renders **pinned memories first, then the most recently updated**, under a character budget. Recall therefore does not depend on the model remembering to search — what it stored is already in front of it, and search is for anything older than the budget allows.
+另有一个 `memory:recall` 提示词区段，在字数预算内渲染**置顶记忆在前、最近更新的在后**。因此召回不依赖模型记得去搜索——它存过的东西已经摆在面前，搜索只用于预算之外更旧的内容。
 
-The `memory_write` description steers the model away from the common failure modes: transient task state (that is what the todo list is for), secrets, and facts the repository already records.
+`memory_write` 的描述会引导模型避开常见误用：临时任务状态（那是 todo 列表的事）、密钥、以及仓库本身已经记录的事实。
 
-## Configuration
+## 配置
 
 ```yaml
 - id: memory
@@ -39,47 +39,47 @@ The `memory_write` description steers the model away from the common failure mod
     promptOrder: 50
 ```
 
-| Field | Default | Meaning |
+| 字段 | 默认值 | 含义 |
 |---|---|---|
-| `path` | — (required) | SQLite file, or `:memory:` for an ephemeral store |
-| `promptRecentCount` | `10` | Unpinned recent memories offered to the prompt section |
-| `promptMaxChars` | `2000` | Budget for the rendered section; overflow is reported as a count, and pinned memories are emitted first so they survive a tight budget |
-| `maxTextChars` | `2000` | Maximum characters accepted for one memory |
-| `searchLimitDefault` | `10` | `memory_search` limit when the model omits it |
-| `searchLimitMax` | `50` | Hard cap, whatever the model asks for |
-| `promptOrder` | `50` | Section order; `-100` is the harness identity, `0` the persona |
+| `path` | —（必填） | SQLite 文件路径，或 `:memory:` 表示纯内存存储 |
+| `promptRecentCount` | `10` | 提示词区段提供的非置顶最近记忆条数 |
+| `promptMaxChars` | `2000` | 渲染区段的字数预算；超出的报告为数量，置顶记忆优先保留 |
+| `maxTextChars` | `2000` | 单条记忆的最大字符数 |
+| `searchLimitDefault` | `10` | 模型未指定时 `memory_search` 的默认条数 |
+| `searchLimitMax` | `50` | 硬性上限，不管模型要多少 |
+| `promptOrder` | `50` | 区段顺序；`-100` 是 harness 身份，`0` 是 persona |
 
-`path` has **no code-side default on purpose**: a default would scatter durable user facts into whatever directory the harness happened to start in. The deployment value lives in the patch row.
+`path` **故意没有代码侧默认值**：默认值会把持久的用户事实散落在 harness 碰巧启动的目录里。部署值放在 patch 行中。
 
-## Storage
+## 存储
 
-One SQLite file: a `memories` table plus two external-content FTS5 indexes kept in sync by triggers. Parent directories are created on open, and the store survives process restarts.
+单个 SQLite 文件：一张 `memories` 表，加两个由触发器保持同步的外部内容 FTS5 索引。打开时自动创建父目录，进程重启后数据保留。
 
-### CJK search
+### 中文搜索
 
-FTS5's `unicode61` tokenizer treats a run of CJK as a single token, so a Chinese keyword can only match a memory storing the exact same character run — `机骸` misses `机骸第九行星`, and a model searching for a word that sits mid-sentence finds nothing. Search therefore tries three strategies in order:
+FTS5 的 `unicode61` 分词器把一整段中文当作一个 token，所以中文关键词只能命中存储了完全相同字串的记忆——`机骸` 匹配不到 `机骸第九行星`，模型搜索句中间的词会一无所获。因此搜索按顺序尝试三种策略：
 
-1. the `unicode61` index, which answers latin and whole-run queries with its original ranking;
-2. a `trigram` index for CJK tokens of three or more characters, which matches a fragment anywhere inside a run;
-3. a `LIKE` sweep for the one- and two-character cases trigram cannot express, requiring every token to appear in the text or tags.
+1. `unicode61` 索引：处理英文和整段匹配，保留原有的排序；
+2. `trigram` 索引：处理三个字符以上的中文 token，可匹配字串中间的任意片段；
+3. `LIKE` 扫描：处理 trigram 无法表达的一到两个字符的情况，要求每个 token 都出现在正文或标签中。
 
-The last two only run when the first found nothing, so the common latin path still costs one query. The sweep is a table scan bounded by the user's own memory count, which stays small. A store created before this version gains the trigram index on first open: the index is rebuilt whenever its row count disagrees with `memories`, so no data is lost and no manual migration is needed.
+后两者只在第一级没有结果时才执行，所以常见的英文路径仍然只有一次查询的开销。扫描是全表扫描，但受用户自己的记忆数量限制，规模很小。在此版本之前创建的库会在首次打开时自动获得 trigram 索引：只要索引行数与 `memories` 不一致就会重建，不丢数据，也不需要手动迁移。
 
-Search splits the query on non-alphanumeric characters and **quotes every token**, so FTS5 operators a model happens to type (`OR`, `*`, `-`) are matched literally instead of changing the query's meaning or raising a syntax error mid-tool-call. Surviving tokens combine with FTS5's implicit AND: every token must appear, and a query whose tokens include a word you did not store legitimately matches nothing. Note that a character a model may intend as punctuation — `a"b` is a single token — becomes a separator, so such a query is read as `a AND b`.
+搜索按非字母数字字符切分查询词，并**给每个 token 加引号**，所以模型随手输入的 FTS5 操作符（`OR`、`*`、`-`）会被按字面匹配，而不是改变查询语义或在工具调用中途抛语法错误。各 token 之间是 FTS5 的隐式 AND：每个 token 都必须出现。注意，模型可能当作标点使用的字符（如 `a"b`）会被当作分隔符，这类查询按 `a AND b` 处理。
 
-`node:sqlite` is still flagged experimental in Node 22/24, so running the harness prints one `ExperimentalWarning`. The harness's own `dsh-session-query-sqlite` uses the same module.
+`node:sqlite` 在 Node 22/24 中仍标记为实验性，所以运行 harness 时会打印一条 `ExperimentalWarning`。harness 自带的 `dsh-session-query-sqlite` 用的也是同一个模块。
 
-## Failure behavior
+## 失败行为
 
-Load-time misconfiguration fails loud: an empty `path`, a non-positive bound, or a `searchLimitDefault` above `searchLimitMax` throws at plugin load.
+加载时的配置错误会直接抛错：`path` 为空、边界值非正数、或 `searchLimitDefault` 大于 `searchLimitMax`，都会在插件加载时抛出。
 
-At call time, a blank fact or one over `maxTextChars` is a tool error the model can correct. A `memory_forget` for an id that does not exist is a **successful** result reporting `forgotten: false` — the model asked for a state that already holds, which is not an infrastructure failure.
+调用时的错误是模型可以自行纠正的工具错误：空白事实、超过 `maxTextChars` 的事实。删除一个不存在的 id 时，`memory_forget` 返回**成功**并报告 `forgotten: false`——模型要求的状态本来就已经成立，这不是基础设施故障。
 
-## Extension points
+## 扩展点
 
-`ctx.tools.register()` for the three tools and `ctx.systemPrompt.section()` for recall. Every registration is a Cordis effect, so unloading the plugin removes the tools and the section together and closes the database.
+三个工具通过 `ctx.tools.register()` 注册，召回区段通过 `ctx.systemPrompt.section()` 注册。所有注册都是 Cordis effect，卸载插件会同时移除工具和区段，并关闭数据库。
 
-## Development
+## 开发
 
 ```bash
 pnpm install --ignore-workspace
@@ -88,17 +88,18 @@ pnpm test
 pnpm run build
 ```
 
-Tests cover the store directly (FTS retrieval, the literal-token query contract, prompt ordering, durability across reopens) and the plugin against the **real** tool registry and prompt service (registration, disposal, the write→recall round trip, bounds, fail-loud config).
+注意：`lib/` 是已提交的构建产物，安装时不需要构建，因此包里没有 `prepare` 脚本（git 依赖的 `prepare` 会被 pnpm 的构建审批拦截）。
 
-## Fork changes
+## 本 fork 的改动
 
-- **Peer range** widened to `^0.1.0-rc.6 || ^0.1.7-rc.2` so the bundle is not skipped by the DSH 0.2.0-rc.2 compatibility gate. Verified against the installed `dsh-tools@0.1.7-rc.2`: `apply`, the three tool shapes, `presentCall` and `output.render` are all unchanged, so no runtime code needed touching.
-- **CJK search** fixed as described above; schema version bumped to 2 and the trigram index backfills itself on open.
+- **peer 范围**放宽为 `^0.1.0-rc.6 || ^0.2.0-rc.2`，使 bundle 不被 DSH 0.2.0-rc.2 的兼容性门禁跳过（门禁拿插件声明的 peer 范围与 DSH 运行时版本做 semver 比较）。已对照实际安装的 `dsh-tools@0.1.7-rc.2` 验证：`apply`、三个工具的形状、`presentCall`、`output.render` 均无变化，运行时代码无需改动。
+- **中文搜索**按上文所述修复；schema 版本升到 2，trigram 索引在打开时自动回填。
+- 删除 `prepare` 脚本，避免 pnpm 对 git 依赖的构建审批。
 
-## License
+## 许可证
 
 MIT
 
-## Prior art
+## 参考
 
-The idea comes from [pi-mentis](https://github.com/guchengod/pi-mentis) (MIT) in the Pi ecosystem. This is an independent implementation against Harness extension points and shares no code with it. It deliberately drops pi-mentis's sidecar process, Zvec vector store, and required SiliconFlow embedding key in favour of one local FTS5 file — smaller, keyless, and offline, at the cost of lexical rather than semantic retrieval.
+思路来自 Pi 生态的 [pi-mentis](https://github.com/guchengod/pi-mentis)（MIT）。本包是针对 Harness 扩展点的独立实现，与其没有共享代码。它有意识地放弃了 pi-mentis 的 sidecar 进程、Zvec 向量库和必需的 SiliconFlow 嵌入 key，改用单个本地 FTS5 文件——更小、免 key、离线可用，代价是词法检索而非语义检索。
